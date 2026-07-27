@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Hooksmith.Core</RootNamespace>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!--
+    Deliberately no <ItemGroup> of PackageReferences: Hooksmith.Core has zero
+    package references. Everything it needs (TimeProvider, System.Text.Json,
+    System.Security.Cryptography, System.Collections.Frozen) ships in the shared
+    framework. If a type in here ever needs EF Core, HttpClient or ASP.NET, the
+    dependency is pointing the wrong way and belongs behind an interface.
+  -->
+
+</Project>

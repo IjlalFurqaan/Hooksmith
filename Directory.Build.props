@@ -1,0 +1,25 @@
+<Project>
+
+  <!--
+    Applied to every project in the solution. Putting the non-negotiable build
+    settings here rather than in each csproj means a newly added project cannot
+    silently opt out of nullable reference types or warnings-as-errors.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <!--
+      Generating the documentation file turns CS1591 ("missing XML comment for
+      publicly visible type or member") into a warning, which the setting above
+      promotes to an error. That is how the "every public API surface gets XML
+      doc comments" rule is enforced by the compiler instead of by review.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

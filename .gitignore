@@ -1,0 +1,28 @@
+## .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+*.suo
+TestResults/
+coverage*.xml
+coverage*.json
+.vs/
+
+## Rider / VS Code
+.idea/
+.vscode/
+
+## Node / Angular
+node_modules/
+dist/
+.angular/
+npm-debug.log*
+
+## Local configuration and secrets
+appsettings.Local.json
+appsettings.*.Local.json
+*.env
+.env.local

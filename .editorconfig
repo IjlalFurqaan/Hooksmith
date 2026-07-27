@@ -1,0 +1,30 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+trim_trailing_whitespace = true
+
+[*.{cs,csproj,props,targets}]
+indent_size = 4
+
+[*.{json,yml,yaml,ts,html,scss,css,js}]
+indent_size = 2
+
+[*.cs]
+# CA1716: type names should not match a reserved keyword in another .NET language.
+# `Event` collides with Visual Basic's `Event`. The domain vocabulary is fixed by the spec
+# and `Event` is the name the API, the database and the dashboard all use; renaming it to
+# WebhookEvent to placate a language this solution will never be consumed from would make
+# every other artefact read worse. Suppressed deliberately, not by accident.
+dotnet_diagnostic.CA1716.severity = none
+
+[Hooksmith.Tests/**/*.cs]
+# CA1707: no underscores in member names. Test methods are sentences, not API surface;
+# `A_tampered_body_fails` is the failure message a future reader gets from the runner.
+dotnet_diagnostic.CA1707.severity = none
+# CA1861: prefer static readonly arrays over inline constant arrays. Inline literals in
+# assertions are clearer at the call site, and test allocation is not a concern.
+dotnet_diagnostic.CA1861.severity = none
