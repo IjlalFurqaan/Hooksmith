@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using System.Text.Json.Serialization;
 using Hooksmith.Core;
 
 namespace Hooksmith.Api.Contracts;
@@ -13,11 +12,16 @@ namespace Hooksmith.Api.Contracts;
 /// the recommended path — a secret you chose is a secret you might have chosen badly.
 /// </param>
 /// <param name="IsActive">Whether the subscription starts active. Defaults to true.</param>
+/// <remarks>
+/// The validation attributes target the constructor parameters, not the generated
+/// properties. MVC reads record validation metadata off the primary constructor and throws
+/// outright if it finds attributes on the properties instead.
+/// </remarks>
 public sealed record CreateSubscriptionRequest(
-    [property: Required, MaxLength(200)] string Name,
-    [property: Required, MaxLength(2000)] string Url,
-    [property: Required, MinLength(1)] IReadOnlyList<string> EventTypes,
-    [property: MaxLength(200)] string? Secret = null,
+    [Required][MaxLength(200)] string Name,
+    [Required][MaxLength(2000)] string Url,
+    [Required][MinLength(1)] IReadOnlyList<string> EventTypes,
+    [MaxLength(200)] string? Secret = null,
     bool IsActive = true);
 
 /// <summary>
@@ -35,11 +39,11 @@ public sealed record CreateSubscriptionRequest(
 /// means leave it alone" loses no expressiveness.
 /// </remarks>
 public sealed record UpdateSubscriptionRequest(
-    [property: MaxLength(200)] string? Name = null,
-    [property: MaxLength(2000)] string? Url = null,
+    [MaxLength(200)] string? Name = null,
+    [MaxLength(2000)] string? Url = null,
     IReadOnlyList<string>? EventTypes = null,
     bool? IsActive = null,
-    [property: MaxLength(200)] string? Secret = null);
+    [MaxLength(200)] string? Secret = null);
 
 /// <summary>A subscription as returned by the API, with the secret masked.</summary>
 /// <param name="Id">Subscription id.</param>
@@ -95,6 +99,4 @@ public sealed record SubscriptionResponse(
 /// rather than a security boundary. It is still worth doing: it keeps secrets out of the
 /// dashboard's list view, out of browser history, and out of screenshots.
 /// </remarks>
-public sealed record CreateSubscriptionResponse(
-    [property: JsonPropertyName("subscription")] SubscriptionResponse Subscription,
-    [property: JsonPropertyName("secret")] string Secret);
+public sealed record CreateSubscriptionResponse(SubscriptionResponse Subscription, string Secret);

@@ -9,9 +9,13 @@ namespace Hooksmith.Api.Contracts;
 /// The producer's JSON body, stored verbatim and delivered verbatim. Hooksmith does not
 /// interpret it beyond requiring that it is valid JSON.
 /// </param>
+/// <remarks>
+/// Validation attributes sit on the constructor parameters, not the generated properties:
+/// MVC reads record validation metadata off the primary constructor.
+/// </remarks>
 public sealed record IngestEventRequest(
-    [property: Required, MaxLength(200)] string Type,
-    [property: Required] JsonElement Payload);
+    [Required][MaxLength(200)] string Type,
+    [Required] JsonElement Payload);
 
 /// <summary>The 202 response to an accepted event.</summary>
 /// <param name="EventId">
