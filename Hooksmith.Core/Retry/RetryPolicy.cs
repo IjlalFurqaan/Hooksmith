@@ -58,8 +58,9 @@ public sealed class RetryPolicy
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="attemptNumber"/> is below 1 or above <see cref="MaxAttempts"/>.
-    /// Asking for the delay before an attempt that will never happen is a caller bug;
-    /// use <see cref="TryGetNextAttemptTime"/>, which reports exhaustion as a result.
+    /// Asking for the delay before an attempt that will never happen is a caller bug; use
+    /// <see cref="TryGetNextAttemptTime(int, out DateTimeOffset)"/>, which reports exhaustion
+    /// as a result.
     /// </exception>
     public TimeSpan DelayForAttempt(int attemptNumber)
     {
@@ -123,4 +124,55 @@ public sealed class RetryPolicy
     /// <param name="attemptCount">Attempts already started for the delivery.</param>
     /// <returns><see langword="true"/> if another attempt is permitted.</returns>
     public static bool HasAttemptsRemaining(int attemptCount) => attemptCount < MaxAttempts;
+
+    /// <summary>
+    /// The longest delay a subscriber may impose through <c>Retry-After</c>.
+    /// </summary>
+    /// <remarks>
+    /// A subscriber asking us to wait a week is either confused or hostile, and honouring it
+    /// would pin a delivery out of sight for a week. The header is advice, not instruction.
+    /// </remarks>
+    public static readonly TimeSpan MaxRetryAfter = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Schedules the next attempt honouring a subscriber's <c>Retry-After</c>, falling back to
+    /// the computed backoff when it is absent or unusable.
+    /// </summary>
+    /// <param name="attemptCount">Attempts already started for the delivery.</param>
+    /// <param name="retryAfter">The subscriber's requested delay, if it sent a usable one.</param>
+    /// <param name="nextAttemptAt">When set, the absolute time the next attempt becomes due.</param>
+    /// <returns>
+    /// <see langword="false"/> when the attempt budget is exhausted, regardless of
+    /// <paramref name="retryAfter"/> — a 429 does not buy a subscriber a seventh attempt.
+    /// </returns>
+    /// <remarks>
+    /// A supplied delay is clamped to <c>[0, MaxRetryAfter]</c>. Preferring it over the computed
+    /// backoff is the whole point: a subscriber that says "not for another 90 seconds" knows
+    /// something about its own recovery that our exponential curve does not.
+    /// </remarks>
+    public bool TryGetNextAttemptTime(
+        int attemptCount,
+        TimeSpan? retryAfter,
+        out DateTimeOffset nextAttemptAt)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(attemptCount);
+
+        if (!HasAttemptsRemaining(attemptCount))
+        {
+            nextAttemptAt = default;
+            return false;
+        }
+
+        if (retryAfter is not { } requested)
+        {
+            return TryGetNextAttemptTime(attemptCount, out nextAttemptAt);
+        }
+
+        var clamped = requested < TimeSpan.Zero
+            ? TimeSpan.Zero
+            : requested > MaxRetryAfter ? MaxRetryAfter : requested;
+
+        nextAttemptAt = _timeProvider.GetUtcNow() + clamped;
+        return true;
+    }
 }

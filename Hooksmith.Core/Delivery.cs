@@ -13,9 +13,12 @@ namespace Hooksmith.Core;
 /// the attempt completes.
 /// </param>
 /// <param name="NextAttemptAt">
-/// When the worker may next claim this delivery. Non-null exactly when the delivery is
-/// waiting to be dispatched (<see cref="DeliveryStatus.Pending"/> or
-/// <see cref="DeliveryStatus.Retrying"/>); null otherwise.
+/// When this delivery next becomes actionable, or null for the terminal states.
+/// <para>For <see cref="DeliveryStatus.Pending"/> and <see cref="DeliveryStatus.Retrying"/>
+/// that means "do not dispatch before this". For <see cref="DeliveryStatus.InFlight"/> it
+/// means "if this time passes and the delivery is still in flight, the worker holding it
+/// died — take it back". Overloading one column for both lets a single index
+/// <c>(status, next_attempt_at)</c> serve dispatching and recovery alike.</para>
 /// </param>
 /// <param name="CreatedAt">When the delivery row was created by fan-out or replay.</param>
 public sealed record Delivery(
@@ -68,19 +71,26 @@ public sealed record Delivery(
     }
 
     /// <summary>
-    /// Claims the delivery for dispatch: moves it to <see cref="DeliveryStatus.InFlight"/>,
-    /// increments <see cref="AttemptCount"/> and clears the due time.
+    /// Claims the delivery for dispatch: moves it to <see cref="DeliveryStatus.InFlight"/> and
+    /// increments <see cref="AttemptCount"/>.
     /// </summary>
+    /// <param name="reclaimAfter">
+    /// The moment after which another worker may assume this attempt was lost and take the
+    /// delivery back. Should comfortably exceed the dispatch timeout.
+    /// </param>
     /// <returns>The claimed delivery.</returns>
     /// <exception cref="InvalidDeliveryTransitionException">The delivery was not awaiting dispatch.</exception>
     /// <remarks>
-    /// The attempt is counted here, before the HTTP call, rather than after it. If a worker
+    /// <para>The attempt is counted here, before the HTTP call, rather than after it. If a worker
     /// process dies mid-flight the count has already moved, so a crash-looping delivery
     /// exhausts its budget and dead-letters instead of retrying forever. Counting on
-    /// completion would make a crash free, which is the wrong direction to fail in.
+    /// completion would make a crash free, which is the wrong direction to fail in.</para>
+    /// <para><paramref name="reclaimAfter"/> is the other half of that bargain: counting the
+    /// attempt early is only safe if a delivery whose worker died is eventually recovered
+    /// rather than left in flight forever.</para>
     /// </remarks>
-    public Delivery Claim() =>
-        TransitionTo(DeliveryStatus.InFlight) with { AttemptCount = AttemptCount + 1 };
+    public Delivery Claim(DateTimeOffset reclaimAfter) =>
+        TransitionTo(DeliveryStatus.InFlight, reclaimAfter) with { AttemptCount = AttemptCount + 1 };
 
     /// <summary>Records a 2xx response. Terminal.</summary>
     /// <returns>The succeeded delivery.</returns>
@@ -117,6 +127,24 @@ public sealed record Delivery(
         return TransitionTo(DeliveryStatus.Pending, timeProvider.GetUtcNow());
     }
 
+    /// <summary>
+    /// Returns an in-flight delivery whose worker appears to have died to
+    /// <see cref="DeliveryStatus.Retrying"/>, due immediately.
+    /// </summary>
+    /// <param name="timeProvider">Clock used for the new due time.</param>
+    /// <returns>The recovered delivery.</returns>
+    /// <exception cref="InvalidDeliveryTransitionException">The delivery was not in flight.</exception>
+    /// <remarks>
+    /// The spent attempt is not refunded. If the worker died after the subscriber had already
+    /// processed the request, refunding it would turn one crash into an unbounded redelivery
+    /// loop against a receiver that was working fine.
+    /// </remarks>
+    public Delivery ReclaimAfterWorkerLoss(TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        return TransitionTo(DeliveryStatus.Retrying, timeProvider.GetUtcNow());
+    }
+
     /// <summary>Whether the delivery is due for dispatch at the given moment.</summary>
     /// <param name="asOf">The moment to evaluate against.</param>
     /// <returns><see langword="true"/> if the worker may claim it now.</returns>
@@ -124,4 +152,10 @@ public sealed record Delivery(
         Status is DeliveryStatus.Pending or DeliveryStatus.Retrying
         && NextAttemptAt is { } due
         && due <= asOf;
+
+    /// <summary>Whether an in-flight delivery has outlived its reclaim deadline.</summary>
+    /// <param name="asOf">The moment to evaluate against.</param>
+    /// <returns><see langword="true"/> if the worker holding it should be assumed dead.</returns>
+    public bool IsAbandonedAt(DateTimeOffset asOf) =>
+        Status is DeliveryStatus.InFlight && NextAttemptAt is { } deadline && deadline <= asOf;
 }

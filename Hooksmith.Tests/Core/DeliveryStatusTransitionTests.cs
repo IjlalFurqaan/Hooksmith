@@ -103,16 +103,49 @@ public sealed class DeliveryStatusTransitionTests
     }
 
     [Fact]
-    public void Claim_increments_the_attempt_count_and_clears_the_due_time()
+    public void Claim_increments_the_attempt_count_and_sets_a_reclaim_deadline()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 7, 27, 12, 0, 0, TimeSpan.Zero));
         var delivery = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time);
 
-        var claimed = delivery.Claim();
+        var claimed = delivery.Claim(Lease(time));
 
         claimed.Status.Should().Be(DeliveryStatus.InFlight);
         claimed.AttemptCount.Should().Be(1);
-        claimed.NextAttemptAt.Should().BeNull();
+        claimed.NextAttemptAt.Should().Be(
+            Lease(time),
+            "counting the attempt before the HTTP call is only safe if a delivery whose worker "
+            + "died is eventually taken back");
+    }
+
+    [Fact]
+    public void An_in_flight_delivery_is_abandoned_once_its_lease_expires()
+    {
+        var start = new DateTimeOffset(2026, 7, 27, 12, 0, 0, TimeSpan.Zero);
+        var time = new FakeTimeProvider(start);
+        var inFlight = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time).Claim(start.AddMinutes(1));
+
+        inFlight.IsAbandonedAt(start.AddSeconds(59)).Should().BeFalse();
+        inFlight.IsAbandonedAt(start.AddMinutes(1)).Should().BeTrue();
+
+        var recovered = inFlight.ReclaimAfterWorkerLoss(time);
+        recovered.Status.Should().Be(DeliveryStatus.Retrying);
+        recovered.NextAttemptAt.Should().Be(start);
+        recovered.AttemptCount.Should().Be(
+            1,
+            "the spent attempt is not refunded; the subscriber may already have processed it");
+    }
+
+    [Theory]
+    [InlineData(DeliveryStatus.Pending)]
+    [InlineData(DeliveryStatus.Retrying)]
+    [InlineData(DeliveryStatus.Succeeded)]
+    [InlineData(DeliveryStatus.DeadLettered)]
+    public void Only_in_flight_deliveries_can_be_abandoned(DeliveryStatus status)
+    {
+        var delivery = DeliveryAt(status) with { NextAttemptAt = DateTimeOffset.UnixEpoch };
+
+        delivery.IsAbandonedAt(DateTimeOffset.UtcNow.AddYears(1)).Should().BeFalse();
     }
 
     [Fact]
@@ -122,9 +155,9 @@ public sealed class DeliveryStatusTransitionTests
         var delivery = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time);
 
         var afterTwoFailures = delivery
-            .Claim()
+            .Claim(Lease(time))
             .ScheduleRetry(time.GetUtcNow().AddSeconds(1))
-            .Claim()
+            .Claim(Lease(time))
             .ScheduleRetry(time.GetUtcNow().AddSeconds(3));
 
         afterTwoFailures.Status.Should().Be(DeliveryStatus.Retrying);
@@ -136,7 +169,7 @@ public sealed class DeliveryStatusTransitionTests
     public void Succeeded_is_terminal_and_cannot_be_reopened()
     {
         var time = new FakeTimeProvider();
-        var succeeded = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time).Claim().Succeed();
+        var succeeded = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time).Claim(Lease(time)).Succeed();
 
         foreach (var status in AllStatuses)
         {
@@ -149,7 +182,7 @@ public sealed class DeliveryStatusTransitionTests
     public void RestoreForReplay_requeues_a_dead_lettered_delivery_due_now()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 7, 27, 12, 0, 0, TimeSpan.Zero));
-        var deadLettered = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time).Claim().DeadLetter();
+        var deadLettered = Delivery.Create(Guid.NewGuid(), Guid.NewGuid(), time).Claim(Lease(time)).DeadLetter();
 
         time.Advance(TimeSpan.FromHours(6));
         var replayed = deadLettered.RestoreForReplay(time);
@@ -169,16 +202,19 @@ public sealed class DeliveryStatusTransitionTests
         pending.IsDueAt(start).Should().BeTrue();
         pending.IsDueAt(start.AddSeconds(-1)).Should().BeFalse();
 
-        var inFlight = pending.Claim();
+        var inFlight = pending.Claim(Lease(time));
         inFlight.IsDueAt(start.AddHours(1)).Should().BeFalse("an in-flight delivery is not claimable");
 
         var retrying = inFlight.ScheduleRetry(start.AddSeconds(30));
         retrying.IsDueAt(start.AddSeconds(29)).Should().BeFalse();
         retrying.IsDueAt(start.AddSeconds(30)).Should().BeTrue();
 
-        var succeeded = pending.Claim().Succeed();
+        var succeeded = pending.Claim(Lease(time)).Succeed();
         succeeded.IsDueAt(start.AddYears(1)).Should().BeFalse();
     }
+
+    /// <summary>A reclaim deadline comfortably beyond any dispatch, for tests that do not care about it.</summary>
+    private static DateTimeOffset Lease(TimeProvider time) => time.GetUtcNow().AddMinutes(1);
 
     /// <summary>Builds a delivery sitting in an arbitrary status, bypassing the state machine.</summary>
     private static Delivery DeliveryAt(DeliveryStatus status) =>
