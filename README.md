@@ -4,10 +4,13 @@ A self-hosted webhook delivery platform. Producers post events; Hooksmith signs 
 them to registered subscriber endpoints, retries failures on a jittered exponential backoff,
 dead-letters what will never succeed, and keeps a per-attempt audit trail you can replay from.
 
-> **Build status: Phases 1–2 of 6 complete.** The domain model, retry policy, signature scheme,
-> persistence, ingest and SSRF guard are built and verified. **Nothing is delivered yet** — the
-> delivery worker is Phase 3. See [What is not implemented](#what-is-not-implemented) for the
-> honest inventory.
+> **Build status: Phases 1–2 verified, Phases 3–4 written but not yet verified end to end.**
+> The domain model, retry policy, signature scheme, persistence, ingest and SSRF guard are
+> built and exercised against real Postgres. The delivery worker, query/replay endpoints and
+> SignalR feed are implemented and unit-tested, but the end-to-end run against a live receiver
+> has not been done — so retry timing, dead-lettering and redirect blocking are currently
+> argued for rather than demonstrated. Phases 5–6 are not started. See
+> [What is not implemented](#what-is-not-implemented) for the honest inventory.
 
 ---
 
@@ -39,24 +42,36 @@ dead-letters what will never succeed, and keeps a per-attempt audit trail you ca
 |---|---|---|
 | **1** | Core domain, transition table, retry policy, signature scheme | ✅ **Done** |
 | **2** | EF Core + Postgres, migrations, subscription CRUD, ingest, idempotency, SSRF guard | ✅ **Done** |
-| **3** | Delivery worker: `BackgroundService`, `SKIP LOCKED`, Channels, HTTP dispatch | ❌ Not started |
-| **4** | Delivery query endpoints, replay, SignalR live feed | ❌ Not started |
+| **3** | Delivery worker: `BackgroundService`, `SKIP LOCKED`, Channels, HTTP dispatch | ⚠️ **Written, not verified** |
+| **4** | Delivery query endpoints, replay, SignalR live feed | ⚠️ **Written, not verified** |
 | **5** | Angular dashboard | ❌ Not started |
 | **6** | Testcontainers integration tests, CI, full compose | ❌ Not started |
 
-**175 unit tests**, all passing in ~190 ms. Release build clean at zero warnings with
+**209 unit tests**, all passing in ~170 ms. Release build clean at zero warnings with
 `TreatWarningsAsErrors`.
 
-### What works end to end today
+### What is verified
 
-You can register subscriptions, post events, and watch Hooksmith fan them out into `Pending`
-delivery rows in Postgres — correctly matched, correctly deduplicated, with hostile URLs
-refused at the door.
+Registering subscriptions, posting events, and fan-out into `Pending` delivery rows —
+correctly matched, correctly deduplicated, with hostile URLs refused at the door. All of that
+was exercised against real Postgres, including a 32-way concurrent idempotency race and a
+`EXPLAIN ANALYZE` confirming the GIN index is used at 50k subscriptions.
 
-### What does not work yet
+### What is written but unproven
 
-Those `Pending` rows **stay pending forever**. There is no worker to claim them, no HTTP
-dispatch, no attempt records, no retries, no dead-lettering, no replay, no dashboard.
+The worker, dispatcher, query/replay endpoints and SignalR hub compile, pass their unit tests,
+and are wired into the host — but **no webhook has yet been delivered by this code**. The
+end-to-end run against a live receiver was set up and then deferred, so these specific claims
+are not yet backed by evidence:
+
+- a fail-twice-then-succeed receiver produces exactly 3 attempts and lands `Succeeded`
+- an always-500 receiver dead-letters after exactly 6
+- a 400 dead-letters on the first attempt without burning the budget
+- a `302` to `169.254.169.254` is blocked at the redirect hop
+- replay creates a new delivery while leaving the original timeline intact
+- two worker instances dispatch the same delivery exactly once
+
+Treat the ⚠️ rows as "reviewed code, untested behaviour" until those run.
 
 ---
 
@@ -98,7 +113,11 @@ The response reports how many deliveries were created. Inspect them:
 docker exec hooksmith-postgres psql -U hooksmith -d hooksmith -c "SELECT status, attempt_count, next_attempt_at FROM deliveries;"
 ```
 
-They will all read `Pending` — and will stay that way until Phase 3 exists.
+With the worker running they should progress to `Succeeded` or `DeadLettered`. Watch it happen:
+
+```bash
+docker exec hooksmith-postgres psql -U hooksmith -d hooksmith -c "SELECT d.status, a.attempt_number, a.status_code, a.error FROM deliveries d LEFT JOIN attempts a ON a.delivery_id = d.id ORDER BY a.attempted_at;"
+```
 
 Run the tests:
 
@@ -112,8 +131,8 @@ dotnet test Hooksmith.slnx
 
 ```
 Hooksmith.Core            domain model, state machine, retry policy, signature computation
-Hooksmith.Infrastructure  EF Core + Postgres, SSRF guard   (HTTP dispatch: Phase 3)
-Hooksmith.Api             ASP.NET Core controllers          (SignalR hub + worker: Phases 3–4)
+Hooksmith.Infrastructure  EF Core + Postgres, HTTP dispatch, SSRF guard
+Hooksmith.Api             controllers, SignalR hub, hosted delivery worker
 Hooksmith.Tests           xUnit + FluentAssertions          (Testcontainers: Phase 6)
 hooksmith-ui              Angular dashboard                 (Phase 5 — does not exist yet)
 docker-compose.yml        Postgres                          (API service: Phase 6)
@@ -154,8 +173,11 @@ Infrastructure, which is what keeps Core free of EF.
 | `Delivery` | `Id`, `EventId`, `SubscriptionId`, `Status`, `AttemptCount`, `NextAttemptAt?`, `CreatedAt` |
 | `Attempt` | `Id`, `DeliveryId`, `AttemptNumber`, `StatusCode?`, `ResponseBody?`, `Error?`, `DurationMs`, `AttemptedAt` |
 
-`NextAttemptAt` is nullable and non-null **exactly when** a delivery is awaiting dispatch
-(`Pending` or `Retrying`).
+`NextAttemptAt` means "when this delivery next becomes actionable", and is null only for the
+terminal states. For `Pending` and `Retrying` it is the dispatch time; for `InFlight` it is the
+**claim lease** — pass it and the worker holding the delivery is assumed dead and the row is
+swept back to `Retrying`. Overloading one column this way lets the single
+`(status, next_attempt_at)` index serve both dispatching and crash recovery.
 
 `Attempt.ResponseBody` is capped at **2 KB measured in UTF-8 bytes**, cut on a character
 boundary. A subscriber answering a webhook with a 5 MB HTML error page should not be able to
@@ -433,14 +455,24 @@ Ingest **never dispatches inline**. It writes the event and its delivery rows in
 transaction and returns, which keeps producer latency independent of how slow, or how numerous,
 its subscribers are.
 
-### Not yet implemented
+### Deliveries (implemented, not yet verified end to end)
 
-| Method | Route | Phase |
+| Method | Route | Status |
 |---|---|---|
-| `GET` | `/api/v1/deliveries?status=&subscriptionId=&from=&to=` | 4 |
-| `GET` | `/api/v1/deliveries/{id}` | 4 |
-| `POST` | `/api/v1/deliveries/{id}/replay` | 4 |
-| — | `/hubs/deliveries` (SignalR) | 4 |
+| `GET` | `/api/v1/deliveries?status=&subscriptionId=&from=&to=&page=&pageSize=` | ⚠️ written |
+| `GET` | `/api/v1/deliveries/{id}` | ⚠️ written |
+| `POST` | `/api/v1/deliveries/{id}/replay` | ⚠️ written |
+| — | `/hubs/deliveries` (SignalR) | ⚠️ written |
+
+The list is paginated (default 50, max 200) and filterable by status, subscription and creation
+window. Detail adds the full attempt timeline plus the payload as delivered.
+
+Replay returns **202** with the id of a *new* delivery carrying the *same* event id. It is
+refused with **409** from any state other than `DeadLettered` or `Succeeded` — replaying a
+delivery the worker still owns would race it and double-send.
+
+The SignalR hub exposes `Watch(subscriptionId)` / `Unwatch(subscriptionId)` and
+`WatchAll()` / `UnwatchAll()`, pushing `DeliveryChanged` to the groups a client has joined.
 
 ---
 
@@ -513,12 +545,15 @@ check that sees the address the socket will actually use.
 |---|---|
 | Subscription registration (`POST`) | ✅ Enforced |
 | Subscription update (`PATCH`, when the URL changes) | ✅ Enforced |
-| Before every dispatch | ❌ **Phase 3** |
-| After every redirect hop | ❌ **Phase 3** |
-| At socket connect time (`ConnectCallback`) | ❌ **Phase 3** |
+| Before every dispatch | ⚠️ Implemented, unverified |
+| After every redirect hop | ⚠️ Implemented, unverified |
+| At socket connect time (`ConnectCallback`) | ⚠️ Implemented, unverified |
 
-The last three live in the HTTP dispatch pipeline, which does not exist yet. The validator API
-is already shaped for all of them; nothing needs redesigning.
+All three now exist in `WebhookDispatcher` and the delivery `HttpClient`: `AllowAutoRedirect`
+is off so hops are followed manually and re-validated, and `SocketsHttpHandler.ConnectCallback`
+validates the resolved address then connects to that exact address — closing the rebinding
+window that URL-level validation structurally cannot. None of it has been exercised against a
+hostile receiver yet.
 
 ---
 
@@ -548,7 +583,7 @@ is already shaped for all of them; nothing needs redesigning.
 | `Ssrf:AllowPrivateNetworks` | `false` | Opens RFC1918 and IPv6 unique-local only. **Never opens link-local** — nobody's receiver lives on `169.254.169.254`. |
 | `Ssrf:RequireHttps` | `false` | Worth turning on for an internet-facing deployment. |
 | `Ssrf:AllowedHosts` | `[]` | A genuine hole in the guard, which is why it is an explicit list of names rather than a pattern. Intended for container-network service names. |
-| `Ssrf:MaxRedirects` | `3` | Declared; **consumed in Phase 3**. |
+| `Ssrf:MaxRedirects` | `3` | Bounds the manual redirect loop in `WebhookDispatcher`. |
 
 Every relaxation defaults to the safe value, so a production deployment that says nothing gets
 the strict policy. `appsettings.Development.json` enables loopback, private networks,
@@ -586,7 +621,7 @@ Column choices worth defending:
 dotnet test Hooksmith.slnx
 ```
 
-**175 unit tests, ~190 ms, zero sleeps.** Coverage:
+**209 unit tests, ~170 ms, zero sleeps.** Coverage:
 
 - **Transition table** — all 25 status pairs, legal and illegal, enumerated rather than
   hand-picked.
@@ -624,37 +659,41 @@ There is **no automated integration test suite yet** — the Postgres verificati
 manual. Testcontainers-based tests are Phase 6, and are the right place for the fan-out,
 retry-count, dead-letter and double-dispatch scenarios.
 
+**The entire delivery path is untested behaviour.** Unit tests cover the *policies* the worker
+consults — outcome classification across all 500 status codes, the retry schedule, the
+`Retry-After` clamp, the claim-lease transitions — but nothing yet exercises the worker,
+the dispatcher, or the claim SQL against a live database and a live receiver. The unit tests
+prove the decisions are right; they say nothing about whether the plumbing carries them out.
+
 ---
 
 ## What is not implemented
 
-### Phase 3 — Delivery worker ❌
+### Phase 3 — Delivery worker ⚠️ written, unverified
 
-Nothing dispatches. Specifically missing:
+All present in code: the `BackgroundService`, `SELECT … FOR UPDATE SKIP LOCKED` claiming,
+bounded parallelism via `System.Threading.Channels`, the named `IHttpClientFactory` client with
+a 10s timeout and **no Polly**, outcome classification, `Attempt` records, `Retry-After`
+handling, and the three remaining SSRF call sites.
 
-- The `BackgroundService` host inside `Hooksmith.Api`.
-- Claiming due deliveries with `SELECT … FOR UPDATE SKIP LOCKED`, so multiple instances do not
-  double-send.
-- Bounded parallelism via `System.Threading.Channels` — one producer reading due deliveries, N
-  consumers dispatching.
-- `IHttpClientFactory` named client, 10s timeout, **no Polly retry policy** (retries are the
-  state machine's job; layering Polly on top double-counts attempts).
-- Outcome classification: `2xx` → `Succeeded`; `408/429/5xx` → `Retrying`; other `4xx` →
-  `DeadLettered` immediately, because a 400 from a subscriber will still be a 400 in thirty
-  seconds.
-- Writing `Attempt` records with status code, truncated body, duration and error.
-- Honouring `Retry-After` on 429 in preference to the computed backoff.
-- The three remaining SSRF call sites (per-dispatch, per-redirect, connect-time).
-- Actually attaching `X-Hooksmith-Signature` to an outbound request. **The signing code exists
-  and is tested, but nothing calls it yet.**
+Two things beyond the original spec, both deliberate:
 
-### Phase 4 — Query, replay, live feed ❌
+- **A claim lease and a reclaim sweep.** Counting the attempt at claim time is only safe if a
+  delivery whose worker died is eventually recovered. Without it, a process killed between
+  claiming and recording leaves deliveries in flight forever — invisible to the claim query,
+  never retried, never dead-lettered. `NextAttemptAt` doubles as the lease deadline for
+  `InFlight`, so one index serves both dispatching and recovery.
+- **`DeliveryProcessor` is split from the worker loop**, so integration tests can drive dispatch
+  deterministically rather than racing a background timer.
 
-- `GET /api/v1/deliveries` with status/subscription/date filters and pagination.
-- `GET /api/v1/deliveries/{id}` with the attempt timeline.
-- `POST /api/v1/deliveries/{id}/replay` — creating a *new* delivery for the same event so the
-  original attempt history stays intact, legal only from `DeadLettered` or `Succeeded`.
-- SignalR hub at `/hubs/deliveries`, with groups keyed by subscription id.
+What is missing is the *evidence*, not the code. See [What is verified](#what-is-verified).
+
+### Phase 4 — Query, replay, live feed ⚠️ written, unverified
+
+`GET /api/v1/deliveries` (filtered, paginated), `GET /api/v1/deliveries/{id}` (with the attempt
+timeline), `POST /api/v1/deliveries/{id}/replay`, and the SignalR hub at `/hubs/deliveries`
+with per-subscription groups are all implemented. None has been exercised against a running
+worker.
 
 ### Phase 5 — Angular dashboard ❌
 
