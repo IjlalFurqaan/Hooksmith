@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>Hooksmith.Api</RootNamespace>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UserSecretsId>hooksmith-api</UserSecretsId>
+  </PropertyGroup>
+
+  <!--
+    No Microsoft.AspNetCore.OpenApi. The template's transitive Microsoft.OpenApi 2.0.0
+    carries GHSA-v5pm-xwqc-g5wc, and pinning the fixed 3.x forward would break the
+    2.x API surface the 10.0 host binds against. An OpenAPI document is not in the
+    spec, so the dependency comes out rather than shipping a known-vulnerable package.
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hooksmith.Infrastructure\Hooksmith.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

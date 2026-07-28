@@ -21,6 +21,12 @@ indent_size = 2
 # every other artefact read worse. Suppressed deliberately, not by accident.
 dotnet_diagnostic.CA1716.severity = none
 
+[Hooksmith.Infrastructure/Persistence/Migrations/**.cs]
+# EF scaffolds these and regenerates them on every `migrations add`. Hand-editing them to
+# satisfy style analyzers means the edits are lost the next time, so they are marked as what
+# they are: generated code.
+generated_code = true
+
 [Hooksmith.Tests/**/*.cs]
 # CA1707: no underscores in member names. Test methods are sentences, not API surface;
 # `A_tampered_body_fails` is the failure message a future reader gets from the runner.

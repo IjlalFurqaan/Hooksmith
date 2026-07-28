@@ -1,4 +1,6 @@
 <Solution>
+  <Project Path="Hooksmith.Api/Hooksmith.Api.csproj" />
   <Project Path="Hooksmith.Core/Hooksmith.Core.csproj" />
+  <Project Path="Hooksmith.Infrastructure/Hooksmith.Infrastructure.csproj" />
   <Project Path="Hooksmith.Tests/Hooksmith.Tests.csproj" />
 </Solution>
