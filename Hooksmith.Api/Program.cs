@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
+using Hooksmith.Api.Realtime;
 using Hooksmith.Api.Services;
+using Hooksmith.Api.Workers;
 using Hooksmith.Infrastructure;
 using Hooksmith.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -18,12 +20,23 @@ builder.Services
 
 builder.Services.AddProblemDetails();
 
+builder.Services
+    .AddSignalR()
+    .AddJsonProtocol(options =>
+        options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+
 // The single clock for the whole application. Nothing calls DateTimeOffset.UtcNow directly,
 // so tests can replace this one registration and control every timestamp in the system.
 builder.Services.AddSingleton(TimeProvider.System);
 
 builder.Services.AddHooksmithInfrastructure(builder.Configuration);
 builder.Services.AddScoped<EventIngestService>();
+
+builder.Services.Configure<DeliveryWorkerOptions>(
+    builder.Configuration.GetSection(DeliveryWorkerOptions.SectionName));
+builder.Services.AddScoped<DeliveryProcessor>();
+builder.Services.AddSingleton<IDeliveryStatusNotifier, SignalRDeliveryStatusNotifier>();
+builder.Services.AddHostedService<DeliveryWorker>();
 
 const string DashboardCorsPolicy = "hooksmith-dashboard";
 builder.Services.AddCors(options => options.AddPolicy(
@@ -32,6 +45,8 @@ builder.Services.AddCors(options => options.AddPolicy(
         .WithOrigins(builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [])
         .AllowAnyHeader()
         .AllowAnyMethod()
+        // Required for SignalR: the negotiate handshake sends credentials, and a wildcard
+        // origin is not permitted alongside them.
         .AllowCredentials()));
 
 var app = builder.Build();
@@ -51,6 +66,8 @@ if (app.Configuration.GetValue("Database:MigrateOnStartup", defaultValue: false)
 app.UseExceptionHandler();
 app.UseCors(DashboardCorsPolicy);
 app.MapControllers();
+app.MapHub<DeliveriesHub>(DeliveriesHub.Route);
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 await app.RunAsync();
 
