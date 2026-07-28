@@ -1,0 +1,24 @@
+# Phase 2 brings up the database the API needs to run against.
+# Phase 6 adds the API service itself, with migrations applied on start.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: hooksmith-postgres
+    environment:
+      POSTGRES_DB: hooksmith
+      POSTGRES_USER: hooksmith
+      POSTGRES_PASSWORD: hooksmith
+    ports:
+      - "5432:5432"
+    volumes:
+      - hooksmith-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The API's migrate-on-startup runs the moment the container is reachable, so
+      # "container started" is not a useful signal — "accepting connections" is.
+      test: ["CMD-SHELL", "pg_isready -U hooksmith -d hooksmith"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  hooksmith-pgdata:
